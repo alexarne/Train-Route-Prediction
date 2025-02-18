@@ -162,7 +162,8 @@ def pollPositions(stations, trains) -> None:
         data = obj["RESPONSE"]["RESULT"][0]
         now = datetime.now(timezone.utc).astimezone()
         formatted_now = now.isoformat(timespec='milliseconds')
-        log(f"Received at {formatted_now} measurement taken at {data["TrainPosition"][0]["TimeStamp"]}")
+        if len(data["TrainPosition"]) > 0:
+            log(f"Received at {formatted_now} measurement taken at {data["TrainPosition"][0]["TimeStamp"]}")
         lastChangeID = int(data["INFO"]["LASTCHANGEID"])
         time.sleep(1)
 
