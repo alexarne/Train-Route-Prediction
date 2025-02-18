@@ -9,6 +9,7 @@ from typing import List
 from pathlib import Path
 from get_trains import getTrains
 import shutil
+import time
 
 load_dotenv("../.env")
 TRAFIKVERKET_API_KEY = os.getenv("TRAFIKVERKET_API_KEY")
@@ -101,10 +102,10 @@ def fetchPositions(stations: List[List[str]]) -> None:
     log(f"Starting data collection between stations:")
     for s1, s2 in stations:
         log(f" - {s1} and {s2}")
-    createDataFolder()
     trains = getAllTrains(stations)
+    pollPositions(stations, trains)
 
-def createDataFolder():
+def createDataFolder() -> None:
     """
     Create the data directory and make sure it didn't exist before.
     """
@@ -130,7 +131,43 @@ def getAllTrains(stations: List[List[str]]) -> List[List[int]]:
         trains.append(getTrains(locationSignature1, locationSignature2))
     return trains
 
+def pollPositions(stations, trains) -> None:
+    """
+    
+    """
+    headers = {
+        "Content-Type": "application/xml"
+    }
+    lastChangeID = 0
+    while True:
+        req = f"""
+        <REQUEST>
+            <LOGIN authenticationkey="{TRAFIKVERKET_API_KEY}"/>
+            <QUERY changeid="{lastChangeID}" objecttype="TrainPosition" namespace="järnväg.trafikinfo" schemaversion="1.1" limit="10000">
+            <FILTER>
+                <AND>
+                    <EQ name="Status.Active" value="true" />
+                    <OR>
+                        {"\n".join([
+                            f'<EQ name="Train.OperationalTrainNumber" value="{trainNumber}" />' for trainList in trains for trainNumber in trainList
+                        ])}
+                    </OR>
+                </AND>
+            </FILTER>
+            </QUERY>
+        </REQUEST>
+        """
+        resp = requests.post(TRAFIKVERKET_URL, data = req, headers = headers)
+        obj = resp.json()
+        data = obj["RESPONSE"]["RESULT"][0]
+        now = datetime.now(timezone.utc).astimezone()
+        formatted_now = now.isoformat(timespec='milliseconds')
+        log(f"Received at {formatted_now} measurement taken at {data["TrainPosition"][0]["TimeStamp"]}")
+        lastChangeID = int(data["INFO"]["LASTCHANGEID"])
+        time.sleep(1)
+
 def main():
+    createDataFolder()
     number = int(input("How many routes do you want to track? "))
     stations = []
     for i in range(number):
@@ -142,9 +179,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-filters = """
-<GT name='TimeStamp' value='$dateadd(-0.00:00:30)' />
-<EQ name="Train.OperationalTrainNumber" value="2139" />
-<EQ name="Status.Active" value="true" />
-"""
