@@ -2,96 +2,23 @@ import os
 from dotenv import load_dotenv
 import requests
 import json
-import sseclient
 from datetime import datetime, timezone
 from utils import log
 from typing import List
 from pathlib import Path
-from get_trains import getTrains
+from get_trains import getTrains, saveTrains
 import shutil
+import time
+import sqlite3
+from geomet import wkt
+import traceback
 import time
 
 load_dotenv("../.env")
 TRAFIKVERKET_API_KEY = os.getenv("TRAFIKVERKET_API_KEY")
 TRAFIKVERKET_URL = "https://api.trafikinfo.trafikverket.se/v2/data.json"
 SJ_API_KEY = os.getenv("SJ_API_KEY")
-
-# class DataCollector:
-#     def __init__(self, STATION1, STATION2):
-#         self.STATION1 = STATION1
-#         self.STATION2 = STATION2
-
-#     def collect(self):
-#         print(f"Starting data collection between {self.STATION1} and {self.STATION2}")
-#         tg1 = TrainGetter(self.STATION1)
-#         tg2 = TrainGetter(self.STATION2)
-#         try:
-#             while True:
-#                 print("routine")
-#                 print(tg1.getTrains())
-#                 time.sleep(5)
-#         finally:
-#             tg1.stop()
-
-#     def request(self, trains):
-
-
-# def handlePositionData(data):
-#     print()
-#     print(f"AdvertisedTrainNumber {data["Train"]["AdvertisedTrainNumber"]}")
-#     print(f"Received at {data.get("ReceivedTime")}")
-#     print(f"Measurement {data.get("TimeStamp")}")
-#     print(f"Speed {data.get("Speed")}")
-#     print(f"Bearing {data.get("Bearing")}")
-
-# def getSSEURL(trainNumber):
-#     headers = {
-#         "Content-Type": "application/xml"
-#     }
-#     req = f"""
-#     <REQUEST>
-#         <LOGIN authenticationkey="{TRAFIKVERKET_API_KEY}"/>
-#         <QUERY changeid="0" objecttype="TrainPosition" namespace="järnväg.trafikinfo" schemaversion="1.1" limit="10000">
-#         <FILTER>
-#             <AND>
-#                 <EQ name="Status.Active" value="true" />
-#                 <OR>
-#                     <EQ name="Train.JourneyPlanNumber" value="{trainNumber}" />
-#                 </OR>
-#             </AND>
-#         </FILTER>
-#         </QUERY>
-#     </REQUEST>
-#     """
-#     resp = requests.post(TRAFIKVERKET_URL, data = req, headers = headers)
-#     obj = resp.json()
-#     print(json.dumps(obj, indent=2))
-#     data = obj["RESPONSE"]["RESULT"][0]
-#     now = datetime.now(timezone.utc).astimezone()
-#     formatted_now = now.isoformat(timespec='milliseconds')
-#     print(f"Received at {receivedTime} measurement taken at {data["TrainPosition"][0]["TimeStamp"]}")
-
-#     return obj["RESPONSE"]["RESULT"][0]["INFO"]["SSEURL"]
-
-# def getPositions(SSEURL):
-#     while True:
-#         print("Starting streaming session...")
-#         session = requests.session()
-#         stream = session.get(SSEURL, stream=True)
-#         client = sseclient.SSEClient(stream)
-#         for event in client.events():
-#             obj = json.loads(event.data)
-#             print(json.dumps(obj, indent=2))
-#             data = obj["RESPONSE"]["RESULT"][0]
-#             now = datetime.datetime.now()
-#             receivedTime = now.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
-#             for train in data["TrainPosition"]:
-#                 train["ReceivedTime"] = receivedTime
-#                 handlePositionData(train)
-#     return 1
-
-
-
+DATA_FOLDER_DIR = os.getenv("DATA_FOLDER_DIR")
 
 def fetchPositions(stations: List[List[str]]) -> None:
     """
@@ -109,13 +36,12 @@ def createDataFolder() -> None:
     """
     Create the data directory and make sure it didn't exist before.
     """
-    dataLocation = "./data"
     while True:
-        file = Path(dataLocation)
+        file = Path(DATA_FOLDER_DIR)
         if file.exists():
-            answer = input("Directory ./data/ already exists. Do you want to remove it? (y/n) ")
+            answer = input(f"Directory {DATA_FOLDER_DIR} already exists. Do you want to remove it? (y/n) ")
             if answer.startswith("y"):
-                shutil.rmtree(dataLocation)
+                shutil.rmtree(DATA_FOLDER_DIR)
             else: 
                 continue
         file.mkdir(parents=True, exist_ok=True)
@@ -124,50 +50,133 @@ def createDataFolder() -> None:
 def getAllTrains(stations: List[List[str]]) -> List[List[int]]:
     """
     Get the trains (identified by OperationalTrainNumber) for all
-    station couples
+    station couples and save them in the corresponding data folders.
     """
-    trains = []
+    result = []
     for locationSignature1, locationSignature2 in stations:
-        trains.append(getTrains(locationSignature1, locationSignature2))
-    return trains
+        trains = getTrains(locationSignature1, locationSignature2)
+        result.append(trains)
+        saveTrains(f"{DATA_FOLDER_DIR}/trains_{locationSignature1}_{locationSignature2}.txt", trains)
+    return result
 
-def pollPositions(stations, trains) -> None:
+def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
     """
     
     """
+    # Setup SQLite database
+    conn = sqlite3.connect(f"{DATA_FOLDER_DIR}/db.sqlite3")
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE route_map (routeNumber INTEGER PRIMARY KEY, name TEXT)")
+    for id, (locationSignature1, locationSignature2) in enumerate(stations):
+        cur.execute("INSERT INTO route_map VALUES (?, ?)", (id, f"{locationSignature1}_{locationSignature2}"))
+    cur.execute("""CREATE TABLE timestamps (
+                routeNumber INTEGER,
+                operationalTrainNumber INTEGER,
+                receivedTime REAL, 
+                modifiedTime REAL, 
+                measuredTime REAL,
+                SWEREF99TM_1 INTEGER,
+                SWEREF99TM_2 INTEGER,
+                WGS84_1 REAL,
+                WGS84_2 REAL,
+                bearing INTEGER,
+                speed INTEGER
+                )""")
+    conn.commit()
+    
+    # Reverse lookup data structure for train id -> route id
+    trainMap = {}
+    for id, trainList in enumerate(trains):
+        for train in trainList:
+            trainMap.setdefault(train, []).append(id)
+    
+    # Start polling
     headers = {
         "Content-Type": "application/xml"
     }
     lastChangeID = 0
-    while True:
-        req = f"""
-        <REQUEST>
-            <LOGIN authenticationkey="{TRAFIKVERKET_API_KEY}"/>
-            <QUERY changeid="{lastChangeID}" objecttype="TrainPosition" namespace="järnväg.trafikinfo" schemaversion="1.1" limit="10000">
-            <FILTER>
-                <AND>
-                    <EQ name="Status.Active" value="true" />
-                    <OR>
-                        {"\n".join([
-                            f'<EQ name="Train.OperationalTrainNumber" value="{trainNumber}" />' for trainList in trains for trainNumber in trainList
-                        ])}
-                    </OR>
-                </AND>
-            </FILTER>
-            </QUERY>
-        </REQUEST>
-        """
-        resp = requests.post(TRAFIKVERKET_URL, data = req, headers = headers)
-        obj = resp.json()
-        data = obj["RESPONSE"]["RESULT"][0]
-        now = datetime.now(timezone.utc).astimezone()
-        formatted_now = now.isoformat(timespec='milliseconds')
-        if len(data["TrainPosition"]) > 0:
-            log(f"Received at {formatted_now} measurement taken at {data["TrainPosition"][0]["TimeStamp"]}")
-        lastChangeID = int(data["INFO"]["LASTCHANGEID"])
-        time.sleep(1)
+    try:
+        while True:
+            req = f"""
+            <REQUEST>
+                <LOGIN authenticationkey="{TRAFIKVERKET_API_KEY}"/>
+                <QUERY changeid="{lastChangeID}" objecttype="TrainPosition" namespace="järnväg.trafikinfo" schemaversion="1.1" limit="10000">
+                <FILTER>
+                    <AND>
+                        <EQ name="Status.Active" value="true" />
+                        <OR>
+                            {"\n".join([
+                                f'<EQ name="Train.OperationalTrainNumber" value="{trainNumber}" />' for trainList in trains for trainNumber in trainList
+                            ])}
+                        </OR>
+                    </AND>
+                </FILTER>
+                </QUERY>
+            </REQUEST>
+            """
+            resp = requests.post(TRAFIKVERKET_URL, data = req, headers = headers)
+            obj = resp.json()
+            data = obj["RESPONSE"]["RESULT"][0]
+            for entry in data["TrainPosition"]:
+                for routeNumber in trainMap.get(entry["Train"]["OperationalTrainNumber"]):
+                    processResponse(conn.cursor(), routeNumber, entry)
+            if len(data["TrainPosition"]) != 0:
+                log("Processed once...")
+
+            conn.commit()
+            lastChangeID = int(data["INFO"]["LASTCHANGEID"])
+            time.sleep(1)
+    except Exception as e:
+        conn.close()
+        log("Closing pollPositions...")
+        log(f"---- Reason:\n{e}")
+        log(f"---- Traceback:\n{traceback.format_exc()}")
+
+def processResponse(db, routeNumber, data):
+    """
+    
+    """
+    # routeNumber, operationalTrainNumber,
+    # receivedTime, modifiedTime, measuredTime, 
+    # SWEREF99TM_1, SWEREF99TM_2, WGS84_1, WGS84_2, 
+    # bearing, speed
+    try:
+        operationalTrainNumber = int(data["Train"]["OperationalTrainNumber"])
+        receivedTime = time.time()
+        modifiedTime = time.time()
+        meaasuredTime = time.time()
+        sweref = wkt.loads(data["Position"]["SWEREF99TM"])
+        SWEREF99TM_1 = sweref["coordinates"][0]
+        SWEREF99TM_2 = sweref["coordinates"][1]
+        wgs = wkt.loads(data["Position"]["WGS84"])
+        WGS84_1 = wgs["coordinates"][0]
+        WGS84_2 = wgs["coordinates"][1]
+        bearing = int(data.get("Bearing") or -1)
+        speed = data.get("Speed")
+        db.execute("INSERT INTO timestamps VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+                    (routeNumber, operationalTrainNumber,
+                     receivedTime, modifiedTime, meaasuredTime,
+                     SWEREF99TM_1, SWEREF99TM_2, WGS84_1, WGS84_2,
+                     bearing, speed))
+    except Exception as e: 
+        log(f"FATAL - Couldn't process data response entry:\n{json.dumps(data, indent=2)}")
+        log(f"---- Reason:\n{e}")
+        log(f"---- Traceback:\n{traceback.format_exc()}")
 
 def main():
+    # createDataFolder()
+    # pollPositions([
+    #     ["test1", "test2"],
+    #     ["test13", "test24"],
+    #     ["2", "qwdq"],
+    #     ["32few", "d12"]
+    # ], [
+    #     [1293],
+    #     [1293],
+    #     [1293],
+    #     [1293]
+    # ])
+    # return
     createDataFolder()
     number = int(input("How many routes do you want to track? "))
     stations = []

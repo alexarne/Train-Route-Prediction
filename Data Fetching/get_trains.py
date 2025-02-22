@@ -14,6 +14,7 @@ load_dotenv("../.env")
 TRAFIKVERKET_API_KEY = os.getenv("TRAFIKVERKET_API_KEY")
 TRAFIKVERKET_URL = "https://api.trafikinfo.trafikverket.se/v2/data.json"
 SJ_API_KEY = os.getenv("SJ_API_KEY")
+DATA_FOLDER_DIR = os.getenv("DATA_FOLDER_DIR")
 
 def getTrains(*locationSignatures) -> List[int]:
     """
@@ -54,18 +55,15 @@ def getTrains(*locationSignatures) -> List[int]:
                 resp = requests.post(TRAFIKVERKET_URL, data = req, headers = headers)
                 break
             except:
-                log("Retrying fetch...")
+                log("Retrying getTrains fetch...")
         obj = resp.json()
         data = obj["RESPONSE"]["RESULT"][0]["TrainAnnouncement"]
         log(f"Interpreting {len(data)} announcements...")
         trains = set()
         for entry in data:
             otn = entry.get("OperationalTrainNumber")
-            ati = entry.get("AdvertisedTrainIdent")
             if otn != None:
                 trains.add(int(otn))
-            elif ati != None:
-                trains.add(int(ati))
         trains = list(trains)
         log(f"Found {len(trains)} trains going to or from {locationSignature}")
         return trains
@@ -85,15 +83,15 @@ def main():
     locationSignature1 = input("First station (code): ")
     locationSignature2 = input("Second station (code): ")
     trains = getTrains(locationSignature1, locationSignature2)
-    location = f"./data/{locationSignature1}_{locationSignature2}/trains.txt"
-    answer = input(f"Want to write them to the file {location}? (y/n) ")
+    dir = f"{DATA_FOLDER_DIR}/trains_{locationSignature1}_{locationSignature2}.txt"
+    answer = input(f"Want to write them to the file {dir}? (y/n) ")
     if answer.startswith("y"):
-        if Path(location).exists():
-            answer = input(f"File {location} already exists. Overwrite? (y/n) ")
+        if Path(dir).exists():
+            answer = input(f"File {dir} already exists. Overwrite? (y/n) ")
             if not answer.startswith("y"):
                 print("Aborting...")
                 return
-        saveTrains(location, trains)
+        saveTrains(dir, trains)
 
 if __name__ == '__main__':
     main()

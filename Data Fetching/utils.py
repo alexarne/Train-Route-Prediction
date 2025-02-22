@@ -4,10 +4,15 @@ Utility functions for data collection.
 
 from pathlib import Path
 from datetime import datetime, timezone
+from dotenv import load_dotenv
+import os
 
 LOGGING = True
 PRINTING = True
-loglocation = "./data/log.txt"
+
+load_dotenv("../.env")
+DATA_FOLDER_DIR = os.getenv("DATA_FOLDER_DIR")
+loglocation = f"{DATA_FOLDER_DIR}/log.txt"
 
 def log(message):
     """
