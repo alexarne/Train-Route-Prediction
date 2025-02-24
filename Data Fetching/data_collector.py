@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 import requests
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from utils import log
 from typing import List
 from pathlib import Path
@@ -20,18 +20,6 @@ TRAFIKVERKET_URL = "https://api.trafikinfo.trafikverket.se/v2/data.json"
 SJ_API_KEY = os.getenv("SJ_API_KEY")
 DATA_FOLDER_DIR = os.getenv("DATA_FOLDER_DIR")
 
-def fetchPositions(stations: List[List[str]]) -> None:
-    """
-    Takes a list of station-couples, sets up the data directory
-    and starts endlessly polling for the positional data of all
-    trains moving between the station-couples.
-    """
-    log(f"Starting data collection between stations:")
-    for s1, s2 in stations:
-        log(f" - {s1} and {s2}")
-    trains = getAllTrains(stations)
-    pollPositions(stations, trains)
-
 def createDataFolder() -> None:
     """
     Create the data directory and make sure it didn't exist before.
@@ -47,42 +35,56 @@ def createDataFolder() -> None:
         file.mkdir(parents=True, exist_ok=True)
         break
 
+def fetchPositions(stations: List[List[str]]) -> None:
+    """
+    Takes a list of station-lists, sets up the data directory
+    and starts endlessly polling for the positional data of all
+    trains moving between the station-lists, regardless of order.
+    """
+    log(f"Starting data collection between stations:")
+    for locations in stations:
+        log(f" - {" and ".join(locations)}")
+    trains = getAllTrains(stations)
+    pollPositions(stations, trains)
+
 def getAllTrains(stations: List[List[str]]) -> List[List[int]]:
     """
     Get the trains (identified by OperationalTrainNumber) for all
-    station couples and save them in the corresponding data folders.
+    station-lists and save them in the corresponding data folders.
     """
     result = []
-    for locationSignature1, locationSignature2 in stations:
-        trains = getTrains(locationSignature1, locationSignature2)
+    for locations in stations:
+        trains = getTrains(*locations)
         result.append(trains)
-        saveTrains(f"{DATA_FOLDER_DIR}/trains_{locationSignature1}_{locationSignature2}.txt", trains)
+        saveTrains(f"{DATA_FOLDER_DIR}/trains_{"_".join(locations)}.txt", trains)
     return result
 
 def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
     """
-    
+    Endlessly poll the positions of the given trains and stores it
+    to database. 
     """
-    # Setup SQLite database
-    conn = sqlite3.connect(f"{DATA_FOLDER_DIR}/db.sqlite3")
-    cur = conn.cursor()
-    cur.execute("CREATE TABLE route_map (routeNumber INTEGER PRIMARY KEY, name TEXT)")
-    for id, (locationSignature1, locationSignature2) in enumerate(stations):
-        cur.execute("INSERT INTO route_map VALUES (?, ?)", (id, f"{locationSignature1}_{locationSignature2}"))
-    cur.execute("""CREATE TABLE timestamps (
-                routeNumber INTEGER,
-                operationalTrainNumber INTEGER,
-                receivedTime REAL, 
-                modifiedTime REAL, 
-                measuredTime REAL,
-                SWEREF99TM_1 INTEGER,
-                SWEREF99TM_2 INTEGER,
-                WGS84_1 REAL,
-                WGS84_2 REAL,
-                bearing INTEGER,
-                speed INTEGER
-                )""")
-    conn.commit()
+    # Setup SQLite databases
+    log("Setting up the databases...")
+    conns = []
+    for locations in stations:
+        conns.append(sqlite3.connect(f"{DATA_FOLDER_DIR}/db_{"_".join(locations)}.sqlite3"))
+        conn = conns[-1]
+        cur = conn.cursor()
+        cur.execute("""CREATE TABLE timestamps (
+                    operationalTrainNumber INTEGER,
+                    journeyNumber INTEGER,
+                    receivedTime REAL, 
+                    modifiedTime REAL, 
+                    measuredTime REAL,
+                    SWEREF99TM_1 INTEGER,
+                    SWEREF99TM_2 INTEGER,
+                    WGS84_1 REAL,
+                    WGS84_2 REAL,
+                    bearing INTEGER,
+                    speed INTEGER
+                    )""")
+        conn.commit()
     
     # Reverse lookup data structure for train id -> route id
     trainMap = {}
@@ -94,9 +96,11 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
     headers = {
         "Content-Type": "application/xml"
     }
+    processedRequests = 0
     lastChangeID = 0
-    try:
-        while True:
+    log("Starting pollPositions...")
+    while True:
+        try:
             req = f"""
             <REQUEST>
                 <LOGIN authenticationkey="{TRAFIKVERKET_API_KEY}"/>
@@ -117,74 +121,106 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
             resp = requests.post(TRAFIKVERKET_URL, data = req, headers = headers)
             obj = resp.json()
             data = obj["RESPONSE"]["RESULT"][0]
+            if lastChangeID == 0:
+                # Skip first pass, ignore potential junk data
+                lastChangeID = int(data["INFO"]["LASTCHANGEID"])
+                continue
+
+            # Store to database
             for entry in data["TrainPosition"]:
-                for routeNumber in trainMap.get(entry["Train"]["OperationalTrainNumber"]):
-                    processResponse(conn.cursor(), routeNumber, entry)
+                otn = int(entry["Train"]["OperationalTrainNumber"])
+                processResponse([conns[routeNumber].cursor() for routeNumber in trainMap.get(otn)], entry)
             if len(data["TrainPosition"]) != 0:
-                log("Processed once...")
+                processedRequests += 1
+                if processedRequests % 100 == 0:
+                    log(f"Processed {processedRequests} requests...")
 
-            conn.commit()
+            # Commit database transactions and finalize
+            for conn in conns:
+                conn.commit()
             lastChangeID = int(data["INFO"]["LASTCHANGEID"])
-            time.sleep(1)
-    except Exception as e:
-        conn.close()
-        log("Closing pollPositions...")
-        log(f"---- Reason:\n{e}")
-        log(f"---- Traceback:\n{traceback.format_exc()}")
+        except Exception as e:
+            log("Exception in pollPositions...")
+            log(f"---- Reason:\n{e}")
+            log(f"---- Traceback:\n{traceback.format_exc()}")
+        time.sleep(1)
 
-def processResponse(db, routeNumber, data):
+trainJourneyNumber = {}
+trainLastSeen = {}
+trainLastPositionSWEREF = {}
+trainLastPositionWGS = {}
+def processResponse(dbs, data):
     """
-    
+    Process the incoming data object for a train position response
+    by inserting it into the databases.
     """
-    # routeNumber, operationalTrainNumber,
+    # operationalTrainNumber, journeyNumber,
     # receivedTime, modifiedTime, measuredTime, 
     # SWEREF99TM_1, SWEREF99TM_2, WGS84_1, WGS84_2, 
     # bearing, speed
+    global trainJourneyNumber
+    global trainLastSeen
+    global trainLastPositionSWEREF
+    global trainLastPositionWGS
     try:
         operationalTrainNumber = int(data["Train"]["OperationalTrainNumber"])
-        receivedTime = time.time()
-        modifiedTime = time.time()
-        meaasuredTime = time.time()
+        receivedTime = datetime.now().timestamp()
+        modifiedTime = datetime.fromisoformat(data["ModifiedTime"]).timestamp()
+        measuredTime = datetime.fromisoformat(data["TimeStamp"]).timestamp()
+        if measuredTime - trainLastSeen.get(operationalTrainNumber, 0) > 3*60*60:
+            trainJourneyNumber[operationalTrainNumber] = trainJourneyNumber.get(operationalTrainNumber, -1) + 1
+        journeyNumber = trainJourneyNumber.get(operationalTrainNumber, 0)
+        trainLastSeen[operationalTrainNumber] = measuredTime
+
+        # Skip entirely if it is the same position as before
+        sameSWEREF = data["Position"]["SWEREF99TM"] == trainLastPositionSWEREF.get(operationalTrainNumber)
+        sameWGS = data["Position"]["WGS84"] == trainLastPositionWGS.get(operationalTrainNumber)
+        if sameSWEREF and sameWGS:
+            return
+        elif sameSWEREF or sameWGS:
+            log(f"Only same {"SWEREF" if sameSWEREF else "WGS"} position for train {operationalTrainNumber}. Proceeding...")
+
         sweref = wkt.loads(data["Position"]["SWEREF99TM"])
         SWEREF99TM_1 = sweref["coordinates"][0]
         SWEREF99TM_2 = sweref["coordinates"][1]
         wgs = wkt.loads(data["Position"]["WGS84"])
         WGS84_1 = wgs["coordinates"][0]
         WGS84_2 = wgs["coordinates"][1]
+        trainLastPositionSWEREF[operationalTrainNumber] = data["Position"]["SWEREF99TM"]
+        trainLastPositionWGS[operationalTrainNumber] = data["Position"]["WGS84"]
+
         bearing = int(data.get("Bearing") or -1)
         speed = data.get("Speed")
-        db.execute("INSERT INTO timestamps VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
-                    (routeNumber, operationalTrainNumber,
-                     receivedTime, modifiedTime, meaasuredTime,
-                     SWEREF99TM_1, SWEREF99TM_2, WGS84_1, WGS84_2,
-                     bearing, speed))
+
+        for db in dbs:
+            db.execute("INSERT INTO timestamps VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+                        (operationalTrainNumber, journeyNumber,
+                        receivedTime, modifiedTime, measuredTime,
+                        SWEREF99TM_1, SWEREF99TM_2, WGS84_1, WGS84_2,
+                        bearing, speed))
     except Exception as e: 
         log(f"FATAL - Couldn't process data response entry:\n{json.dumps(data, indent=2)}")
         log(f"---- Reason:\n{e}")
         log(f"---- Traceback:\n{traceback.format_exc()}")
 
 def main():
-    # createDataFolder()
-    # pollPositions([
-    #     ["test1", "test2"],
-    #     ["test13", "test24"],
-    #     ["2", "qwdq"],
-    #     ["32few", "d12"]
-    # ], [
-    #     [1293],
-    #     [1293],
-    #     [1293],
-    #     [1293]
-    # ])
-    # return
     createDataFolder()
-    number = int(input("How many routes do you want to track? "))
     stations = []
-    for i in range(number):
-        print(f"------ Route {i+1} ------")
-        station1 = input(f"First station (code): ")
-        station2 = input(f"Second station (code): ")
-        stations.append([station1, station2])
+    i = 1
+    while True:
+        print(f"------ Route {i} (press Enter to finish) ------")
+        j = 1
+        route = []
+        while True:
+            station = input(f"Station {j} (code): ")
+            if station == "":
+                break
+            j += 1
+            route.append(station)
+        if len(route) == 0:
+            break
+        i += 1
+        stations.append(route)
     fetchPositions(stations)
 
 if __name__ == '__main__':

@@ -80,10 +80,16 @@ def saveTrains(location: str, trains: List[int]) -> None:
             f.write(f"{train}\n")
 
 def main():
-    locationSignature1 = input("First station (code): ")
-    locationSignature2 = input("Second station (code): ")
-    trains = getTrains(locationSignature1, locationSignature2)
-    dir = f"{DATA_FOLDER_DIR}/trains_{locationSignature1}_{locationSignature2}.txt"
+    stations = []
+    i = 1
+    while True:
+        station = input(f"Station {i} (code): ")
+        if station == "":
+            break
+        stations.append(station)
+        i += 1
+    trains = getTrains(*stations)
+    dir = f"{DATA_FOLDER_DIR}/trains_{"_".join(stations)}.txt"
     answer = input(f"Want to write them to the file {dir}? (y/n) ")
     if answer.startswith("y"):
         if Path(dir).exists():
@@ -92,6 +98,9 @@ def main():
                 print("Aborting...")
                 return
         saveTrains(dir, trains)
+    else:
+        trains.sort()
+        print(trains)
 
 if __name__ == '__main__':
     main()
