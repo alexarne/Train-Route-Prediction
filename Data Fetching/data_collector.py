@@ -132,7 +132,6 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]], inclusions
                 </QUERY>
             </REQUEST>
             """
-            print(req)
             resp = requests.post(TRAFIKVERKET_URL, data = req, headers = headers)
             obj = resp.json()
             receivedResponse = json.dumps(obj, indent=2)
