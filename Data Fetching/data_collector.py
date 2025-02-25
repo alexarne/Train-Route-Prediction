@@ -35,17 +35,18 @@ def createDataFolder() -> None:
         file.mkdir(parents=True, exist_ok=True)
         break
 
-def fetchPositions(stations: List[List[str]]) -> None:
+def fetchPositions(stations: List[List[str]], inclusions: List[str]) -> None:
     """
     Takes a list of station-lists, sets up the data directory
     and starts endlessly polling for the positional data of all
-    trains moving between the station-lists, regardless of order.
+    trains moving between the station-lists, regardless of order,
+    and within the inclusion-box (if specified).
     """
     log(f"Starting data collection between stations:")
-    for locations in stations:
-        log(f" - {" and ".join(locations)}")
+    for locations, inclusion in zip(stations, inclusions):
+        log(f" - {" and ".join(locations)} {f"within box {inclusion}" if inclusion != "" else ""}")
     trains = getAllTrains(stations)
-    pollPositions(stations, trains)
+    pollPositions(stations, trains, inclusions)
 
 def getAllTrains(stations: List[List[str]]) -> List[List[int]]:
     """
@@ -59,7 +60,8 @@ def getAllTrains(stations: List[List[str]]) -> List[List[int]]:
         saveTrains(f"{DATA_FOLDER_DIR}/trains_{"_".join(locations)}.txt", trains)
     return result
 
-def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
+receivedResponse = ""
+def pollPositions(stations: List[List[str]], trains: List[List[int]], inclusions: List[str]) -> None:
     """
     Endlessly poll the positions of the given trains and stores it
     to database. 
@@ -91,6 +93,10 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
     for id, trainList in enumerate(trains):
         for train in trainList:
             trainMap.setdefault(train, []).append(id)
+    # Pre-mark last seen timestamps
+    for trainList in trains:
+        for train in trainList:
+            trainLastSeen[train] = datetime.now().timestamp()
     
     # Start polling
     headers = {
@@ -98,6 +104,7 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
     }
     processedRequests = 0
     lastChangeID = 0
+    global receivedResponse
     log("Starting pollPositions...")
     while True:
         try:
@@ -109,8 +116,15 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
                     <AND>
                         <EQ name="Status.Active" value="true" />
                         <OR>
-                            {"\n".join([
-                                f'<EQ name="Train.OperationalTrainNumber" value="{trainNumber}" />' for trainList in trains for trainNumber in trainList
+                            {"\n".join([f"""
+                                <AND>
+                                    <OR>
+                                        {"\n".join([
+                                            f'<EQ name="Train.OperationalTrainNumber" value="{trainNumber}" />' for trainNumber in trainList
+                                        ])}
+                                    </OR>
+                                    {f'<WITHIN name="Position.WGS84" shape="box" value="{box}" />' if box != "" else ""} 
+                                </AND>""" for trainList, box in zip(trains, inclusions)
                             ])}
                         </OR>
                     </AND>
@@ -118,8 +132,10 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
                 </QUERY>
             </REQUEST>
             """
+            print(req)
             resp = requests.post(TRAFIKVERKET_URL, data = req, headers = headers)
             obj = resp.json()
+            receivedResponse = json.dumps(obj, indent=2)
             data = obj["RESPONSE"]["RESULT"][0]
             if lastChangeID == 0:
                 # Skip first pass, ignore potential junk data
@@ -139,16 +155,16 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
             for conn in conns:
                 conn.commit()
             lastChangeID = int(data["INFO"]["LASTCHANGEID"])
+            time.sleep(1)
         except Exception as e:
             log("Exception in pollPositions...")
             log(f"---- Reason:\n{e}")
             log(f"---- Traceback:\n{traceback.format_exc()}")
-        time.sleep(1)
+            log(f"---- Received response:\n{receivedResponse}")
 
 trainJourneyNumber = {}
 trainLastSeen = {}
 trainLastPositionSWEREF = {}
-trainLastPositionWGS = {}
 def processResponse(dbs, data):
     """
     Process the incoming data object for a train position response
@@ -161,7 +177,6 @@ def processResponse(dbs, data):
     global trainJourneyNumber
     global trainLastSeen
     global trainLastPositionSWEREF
-    global trainLastPositionWGS
     try:
         operationalTrainNumber = int(data["Train"]["OperationalTrainNumber"])
         receivedTime = datetime.now().timestamp()
@@ -172,14 +187,14 @@ def processResponse(dbs, data):
         journeyNumber = trainJourneyNumber.get(operationalTrainNumber, 0)
         trainLastSeen[operationalTrainNumber] = measuredTime
 
+        # Skip entirely if it's the 0:th journey, aka already ongoing
+        if journeyNumber == 0:
+            return
         # Skip entirely if it is the same position as before
         sameSWEREF = data["Position"]["SWEREF99TM"] == trainLastPositionSWEREF.get(operationalTrainNumber)
-        sameWGS = data["Position"]["WGS84"] == trainLastPositionWGS.get(operationalTrainNumber)
-        if sameSWEREF and sameWGS:
+        if sameSWEREF:
             return
-        elif sameSWEREF or sameWGS:
-            log(f"Only same {"SWEREF" if sameSWEREF else "WGS"} position for train {operationalTrainNumber}. Proceeding...")
-
+        
         sweref = wkt.loads(data["Position"]["SWEREF99TM"])
         SWEREF99TM_1 = sweref["coordinates"][0]
         SWEREF99TM_2 = sweref["coordinates"][1]
@@ -187,7 +202,6 @@ def processResponse(dbs, data):
         WGS84_1 = wgs["coordinates"][0]
         WGS84_2 = wgs["coordinates"][1]
         trainLastPositionSWEREF[operationalTrainNumber] = data["Position"]["SWEREF99TM"]
-        trainLastPositionWGS[operationalTrainNumber] = data["Position"]["WGS84"]
 
         bearing = int(data.get("Bearing") or -1)
         speed = data.get("Speed")
@@ -206,6 +220,7 @@ def processResponse(dbs, data):
 def main():
     createDataFolder()
     stations = []
+    inclusions = []
     i = 1
     while True:
         print(f"------ Route {i} (press Enter to finish) ------")
@@ -214,6 +229,10 @@ def main():
         while True:
             station = input(f"Station {j} (code): ")
             if station == "":
+                if len(route) == 0:
+                    break
+                box = input("Define a region (box) of interest (WGS84): ")
+                inclusions.append(box)
                 break
             j += 1
             route.append(station)
@@ -221,7 +240,7 @@ def main():
             break
         i += 1
         stations.append(route)
-    fetchPositions(stations)
+    fetchPositions(stations, inclusions)
 
 if __name__ == '__main__':
     main()
