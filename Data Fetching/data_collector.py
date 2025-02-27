@@ -181,18 +181,18 @@ def processResponse(dbs, data):
         receivedTime = datetime.now().timestamp()
         modifiedTime = datetime.fromisoformat(data["ModifiedTime"]).timestamp()
         measuredTime = datetime.fromisoformat(data["TimeStamp"]).timestamp()
-        if measuredTime - trainLastSeen.get(operationalTrainNumber, 0) > 3*60*60:
+        if measuredTime - trainLastSeen.get(operationalTrainNumber, 0) > 60*60:
             trainJourneyNumber[operationalTrainNumber] = trainJourneyNumber.get(operationalTrainNumber, 0) + 1
         journeyNumber = trainJourneyNumber.get(operationalTrainNumber, 0)
         trainLastSeen[operationalTrainNumber] = measuredTime
 
-        # Skip entirely if it's the 0:th journey, aka already ongoing
-        if journeyNumber == 0:
-            return
-        # Skip entirely if it is the same position as before
-        sameSWEREF = data["Position"]["SWEREF99TM"] == trainLastPositionSWEREF.get(operationalTrainNumber)
-        if sameSWEREF:
-            return
+        # # Skip entirely if it's the 0:th journey, aka already ongoing
+        # if journeyNumber == 0:
+        #     return
+        # # Skip entirely if it is the same position as before
+        # sameSWEREF = data["Position"]["SWEREF99TM"] == trainLastPositionSWEREF.get(operationalTrainNumber)
+        # if sameSWEREF:
+        #     return
         
         sweref = wkt.loads(data["Position"]["SWEREF99TM"])
         SWEREF99TM_1 = sweref["coordinates"][0]
