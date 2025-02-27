@@ -20,6 +20,14 @@ TRAFIKVERKET_URL = "https://api.trafikinfo.trafikverket.se/v2/data.json"
 SJ_API_KEY = os.getenv("SJ_API_KEY")
 DATA_FOLDER_DIR = os.getenv("DATA_FOLDER_DIR")
 
+trainInclusions = []
+trainMap = {}
+receivedResponse = ""
+databases = []
+trainJourneyNumber = {}
+trainLastSeen = {}
+trainLastPositionSWEREF = {}
+
 def createDataFolder() -> None:
     """
     Create the data directory and make sure it didn't exist before.
@@ -35,7 +43,7 @@ def createDataFolder() -> None:
         file.mkdir(parents=True, exist_ok=True)
         break
 
-def fetchPositions(stations: List[List[str]], inclusions: List[str]) -> None:
+def fetchPositions(stations: List[List[str]]) -> None:
     """
     Takes a list of station-lists, sets up the data directory
     and starts endlessly polling for the positional data of all
@@ -43,10 +51,11 @@ def fetchPositions(stations: List[List[str]], inclusions: List[str]) -> None:
     and within the inclusion-box (if specified).
     """
     log(f"Starting data collection between stations:")
-    for locations, inclusion in zip(stations, inclusions):
+    global trainInclusions
+    for locations, inclusion in zip(stations, trainInclusions):
         log(f" - {" and ".join(locations)} {f"within box {inclusion}" if inclusion != "" else ""}")
     trains = getAllTrains(stations)
-    pollPositions(stations, trains, inclusions)
+    pollPositions(stations, trains)
 
 def getAllTrains(stations: List[List[str]]) -> List[List[int]]:
     """
@@ -60,18 +69,17 @@ def getAllTrains(stations: List[List[str]]) -> List[List[int]]:
         saveTrains(f"{DATA_FOLDER_DIR}/trains_{"_".join(locations)}.txt", trains)
     return result
 
-receivedResponse = ""
-def pollPositions(stations: List[List[str]], trains: List[List[int]], inclusions: List[str]) -> None:
+def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
     """
     Endlessly poll the positions of the given trains and stores it
     to database. 
     """
     # Setup SQLite databases
     log("Setting up the databases...")
-    conns = []
+    global databases
     for locations in stations:
-        conns.append(sqlite3.connect(f"{DATA_FOLDER_DIR}/db_{"_".join(locations)}.sqlite3"))
-        conn = conns[-1]
+        databases.append(sqlite3.connect(f"{DATA_FOLDER_DIR}/db_{"_".join(locations)}.sqlite3"))
+        conn = databases[-1]
         cur = conn.cursor()
         cur.execute("""CREATE TABLE timestamps (
                     operationalTrainNumber INTEGER,
@@ -89,7 +97,7 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]], inclusions
         conn.commit()
     
     # Reverse lookup data structure for train id -> route id
-    trainMap = {}
+    global trainMap
     for id, trainList in enumerate(trains):
         for train in trainList:
             trainMap.setdefault(train, []).append(id)
@@ -105,6 +113,7 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]], inclusions
     processedRequests = 0
     lastChangeID = 0
     global receivedResponse
+    global trainInclusions
     log("Starting pollPositions...")
     while True:
         try:
@@ -124,7 +133,7 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]], inclusions
                                         ])}
                                     </OR>
                                     {f'<WITHIN name="Position.WGS84" shape="box" value="{box}" />' if box != "" else ""} 
-                                </AND>""" for trainList, box in zip(trains, inclusions)
+                                </AND>""" for trainList, box in zip(trains, trainInclusions)
                             ])}
                         </OR>
                     </AND>
@@ -143,15 +152,14 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]], inclusions
 
             # Store to database
             for entry in data["TrainPosition"]:
-                otn = int(entry["Train"]["OperationalTrainNumber"])
-                processResponse([conns[routeNumber].cursor() for routeNumber in trainMap.get(otn)], entry)
+                processResponse(entry)
             if len(data["TrainPosition"]) != 0:
                 processedRequests += 1
                 if processedRequests % 100 == 0:
                     log(f"Processed {processedRequests} requests...")
 
             # Commit database transactions and finalize
-            for conn in conns:
+            for conn in databases:
                 conn.commit()
             lastChangeID = int(data["INFO"]["LASTCHANGEID"])
             time.sleep(1)
@@ -161,10 +169,7 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]], inclusions
             log(f"---- Traceback:\n{traceback.format_exc()}")
             log(f"---- Received response:\n{receivedResponse}")
 
-trainJourneyNumber = {}
-trainLastSeen = {}
-trainLastPositionSWEREF = {}
-def processResponse(dbs, data):
+def processResponse(data):
     """
     Process the incoming data object for a train position response
     by inserting it into the databases.
@@ -177,6 +182,7 @@ def processResponse(dbs, data):
     global trainLastSeen
     global trainLastPositionSWEREF
     try:
+        dbs = getDBs(data)
         operationalTrainNumber = int(data["Train"]["OperationalTrainNumber"])
         receivedTime = datetime.now().timestamp()
         modifiedTime = datetime.fromisoformat(data["ModifiedTime"]).timestamp()
@@ -216,10 +222,34 @@ def processResponse(dbs, data):
         log(f"---- Reason:\n{e}")
         log(f"---- Traceback:\n{traceback.format_exc()}")
 
+def getDBs(data):
+    global trainMap
+    global databases
+    global trainInclusions
+    otn = int(data["Train"]["OperationalTrainNumber"])
+    dbs = []
+    # Check if the train is within its database's inclusion zone
+    for routeNumber in trainMap.get(otn):
+        inclusion = trainInclusions[routeNumber]
+        if inclusion == "":
+            dbs.append(databases[routeNumber].cursor())
+            continue
+        inclusionPoints = [list(map(float, a.split(" "))) for a in inclusion.split(", ")]
+        x = [p[0] for p in inclusionPoints]
+        y = [p[1] for p in inclusionPoints]
+        x.sort(), y.sort()
+        wgs = wkt.loads(data["Position"]["WGS84"])
+        WGS84_X = wgs["coordinates"][0]
+        WGS84_Y = wgs["coordinates"][1]
+        if WGS84_X > x[0] and WGS84_X < x[1] and WGS84_Y > y[0] and WGS84_Y < y[1]:
+            dbs.append(databases[routeNumber].cursor())
+    return dbs
+
+
 def main():
     createDataFolder()
     stations = []
-    inclusions = []
+    global trainInclusions
     i = 1
     while True:
         print(f"------ Route {i} (press Enter to finish) ------")
@@ -231,7 +261,7 @@ def main():
                 if len(route) == 0:
                     break
                 box = input("Define a region (box) of interest (WGS84): ")
-                inclusions.append(box)
+                trainInclusions.append(box)
                 break
             j += 1
             route.append(station)
@@ -239,7 +269,7 @@ def main():
             break
         i += 1
         stations.append(route)
-    fetchPositions(stations, inclusions)
+    fetchPositions(stations)
 
 if __name__ == '__main__':
     main()
