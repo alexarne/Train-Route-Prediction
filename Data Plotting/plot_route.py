@@ -121,7 +121,7 @@ def generate_map(database_path):
                         }} else {{
                             // Move to next journey number
                             let availableJourneys = Object.keys(trainRoutes[selectedTrain]).length;
-                            if (parseInt(selectedJourney) < availableJourneys - 1) {{
+                            if (parseInt(selectedJourney) < availableJourneys) {{
                                 selectedJourney = "" + (parseInt(selectedJourney)+1)
                                 markerIndex = 0;
                                 document.getElementById("journeySelect").value = selectedJourney;
@@ -135,7 +135,7 @@ def generate_map(database_path):
                     if (markerRange.length > 1) {{
                         markerRange.pop();
                         markerIndex--;
-                        if (markerIndex < 1 && parseInt(selectedJourney) > 0) {{
+                        if (markerIndex < 1 && parseInt(selectedJourney) > 1) {{
                             selectedJourney = "" + (parseInt(selectedJourney)-1)
                             markerIndex = trainRoutes[selectedTrain][selectedJourney].length
                             document.getElementById("journeySelect").value = selectedJourney;
