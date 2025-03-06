@@ -54,6 +54,8 @@ def generate_map(database_path):
                 #map {{ height: 100%; width: 100%; }}
                 #infoBox {{ position: absolute; top: 10px; left: 10px; background: white; padding: 10px; border-radius: 5px; z-index: 1000; }}
                 #controls {{ position: absolute; top: 10px; right: 10px; background: white; padding: 10px; border-radius: 5px; z-index: 1000; }}
+                #sliderContainer {{ position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); background: white; padding: 10px; border-radius: 5px; z-index: 1000; width: clamp(100px, 70% 400px); }}
+                #markerSlider {{ width: 100%; }}
             </style>
         </head>
         <body>
@@ -66,6 +68,9 @@ def generate_map(database_path):
                 </select>
                 <label for="journeySelect">Journey:</label>
                 <select id="journeySelect" onchange="updateJourney()"></select>
+            </div>
+            <div id="sliderContainer">
+                <input type="range" id="markerSlider" min="1" value="1" step="1" oninput="updateMarkerFromSlider()">
             </div>
             <script>
                 var map = L.map('map').setView([59.8, 17.7], 12);
@@ -91,11 +96,13 @@ def generate_map(database_path):
                         journeySelect.innerHTML += `<option value="${{journey}}">${{journey}}</option>`;
                     }});
                     selectedJourney = Object.keys(trainRoutes[selectedTrain])[0];
+                    updateSliderMax()
                     resetAnimation();
                 }}
 
                 function updateJourney() {{
                     selectedJourney = document.getElementById("journeySelect").value;
+                    updateSliderMax()
                     resetAnimation();
                 }}
 
@@ -103,6 +110,7 @@ def generate_map(database_path):
                     markerRange = [];
                     markerIndex = 0;
                     clearMarkers();
+                    updateSliderValue()
                     nextMarker();
                 }}
 
@@ -117,6 +125,7 @@ def generate_map(database_path):
                         if (markerIndex < route.length) {{
                             markerRange.push(route[markerIndex]);
                             markerIndex++;
+                            updateSliderValue()
                             updateMarkers();
                         }} else {{
                             // Move to next journey number
@@ -125,6 +134,7 @@ def generate_map(database_path):
                                 selectedJourney = "" + (parseInt(selectedJourney)+1)
                                 markerIndex = 0;
                                 document.getElementById("journeySelect").value = selectedJourney;
+                                updateSliderMax()
                                 nextMarker();
                             }}
                         }}
@@ -141,6 +151,7 @@ def generate_map(database_path):
                             document.getElementById("journeySelect").value = selectedJourney;
                         }}
                         updateMarkers();
+                        updateSliderValue();
                     }}
                 }}
 
@@ -169,6 +180,25 @@ def generate_map(database_path):
                         `;
                         map.setView([lastPoint.lat, lastPoint.lon], 14);
                     }}
+                }}
+
+                function updateSliderMax() {{
+                    document.getElementById("markerSlider").max = "" + (trainRoutes[selectedTrain][selectedJourney].length)
+                }}
+
+                function updateSliderValue() {{
+                    document.getElementById("markerSlider").value = "" + markerIndex
+                }}
+
+                function updateMarkerFromSlider() {{
+                    let route = trainRoutes[selectedTrain][selectedJourney]
+                    let value = parseInt(document.getElementById("markerSlider").value)
+                    let change = value - markerIndex
+                    for (let i = 0; i < Math.abs(change); ++i) {{
+                        if (change > 0) nextMarker()
+                        if (change < 0) previousMarker()
+                    }}
+                    updateMarkers()
                 }}
                 
                 document.addEventListener('keydown', (event) => {{
