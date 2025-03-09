@@ -114,6 +114,7 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
     lastChangeID = 0
     global receivedResponse
     global trainInclusions
+    text = ""
     log("Starting pollPositions...")
     while True:
         try:
@@ -142,6 +143,7 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
             </REQUEST>
             """
             resp = requests.post(TRAFIKVERKET_URL, data = req, headers = headers)
+            text = resp.text
             obj = resp.json()
             receivedResponse = json.dumps(obj, indent=2)
             data = obj["RESPONSE"]["RESULT"][0]
@@ -167,6 +169,7 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
             log("Exception in pollPositions...")
             log(f"---- Reason:\n{e}")
             log(f"---- Traceback:\n{traceback.format_exc()}")
+            log(f"---- Received text:\n{text}")
             log(f"---- Received response:\n{receivedResponse}")
 
 def processResponse(data):
