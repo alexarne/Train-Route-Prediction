@@ -142,7 +142,7 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
                 </QUERY>
             </REQUEST>
             """
-            resp = requests.post(TRAFIKVERKET_URL, data = req, headers = headers)
+            resp = requests.post(TRAFIKVERKET_URL, data = req, headers = headers, timeout=10)
             text = resp.text
             obj = resp.json()
             receivedResponse = json.dumps(obj, indent=2)
@@ -165,6 +165,8 @@ def pollPositions(stations: List[List[str]], trains: List[List[int]]) -> None:
                 conn.commit()
             lastChangeID = int(data["INFO"]["LASTCHANGEID"])
             time.sleep(1)
+        except requests.exceptions.Timeout:
+            log("---- pollPositions Timed out")
         except Exception as e:
             log("Exception in pollPositions...")
             log(f"---- Reason:\n{e}")
