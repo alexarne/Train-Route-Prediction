@@ -1,10 +1,6 @@
 import os
 from dotenv import load_dotenv
 import requests
-import json
-import sseclient
-import datetime
-import pytz
 
 load_dotenv("../.env")
 TRAFIKVERKET_API_KEY = os.getenv("TRAFIKVERKET_API_KEY")
